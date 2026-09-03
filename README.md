@@ -4,7 +4,7 @@
 
 PowerShell tool for Azure compute vCPU quota increases: it checks the quota you already have, requests more through the `Microsoft.Quota` API, and escalates to an Azure support case only when the automatic request is refused.
 
-> **Just want the process, not the tool?** [docs/quota-automation-manual.md](docs/quota-automation-manual.md) documents the same steps as standalone REST/PowerShell snippets you can drop into your own code or share with a customer.
+> **Just want the process, not the tool?** [docs/quota-automation-manual.md](docs/quota-automation-manual.md) documents the same steps as standalone REST/PowerShell snippets you can drop into your own code.
 
 ---
 
