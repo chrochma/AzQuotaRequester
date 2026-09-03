@@ -221,8 +221,22 @@ function Get-AqrMcpToolDefinition {
             annotations = @{ title = 'Show Azure context'; readOnlyHint = $true; destructiveHint = $false; openWorldHint = $true }
         },
         @{
+            name        = 'azqr_assess_sku'
+            description = 'One-call answer to "can I actually deploy this here, and what should I use instead". Combines quota, subscription restrictions, region and zone availability, then recommends whether to proceed, pin zones, switch to a newer SKU, or raise a support case - with ranked alternatives. Prefer this over calling check_quota, check_sku and suggest_skus separately. Read-only.'
+            inputSchema = @{
+                type       = 'object'
+                properties = @{
+                    location       = @{ type = 'string'; description = "Azure region, e.g. 'westeurope' or 'West Europe'." }
+                    vmSku          = @{ type = 'string'; description = "VM SKU or quota family, e.g. 'Standard_D4ads_v7', 'dadsv7' or 'Standard Dadsv7 Family vCPUs'." }
+                    subscriptionId = @{ type = 'string'; description = 'Optional. Defaults to the current context.' }
+                }
+                required   = @('location', 'vmSku')
+            }
+            annotations = @{ title = 'Assess SKU and recommend'; readOnlyHint = $true; destructiveHint = $false; openWorldHint = $true }
+        },
+        @{
             name        = 'azqr_check_quota'
-            description = 'Read the current vCPU quota for a VM SKU or quota family in a region: limit, used and available, for both the SKU family and the regional total. Read-only.'
+            description = 'Read the current vCPU quota for a VM SKU or quota family in a region: limit, used and available, for both the SKU family and the regional total. Also reports whether the SKU is actually usable, because quota headroom is meaningless when the SKU is restricted. Read-only.'
             inputSchema = @{
                 type       = 'object'
                 properties = @{
@@ -290,6 +304,195 @@ function Get-AqrMcpQuotaFamily {
     (Resolve-AqrVmSku -SubscriptionId $SubscriptionId -Location $Location -VmSku $Sku.Name).Family
 }
 
+function Get-AqrMcpAlternativeScore {
+    <#
+    .SYNOPSIS
+        Ranks a candidate SKU or family. Higher is better.
+    .DESCRIPTION
+        Usability dominates everything: an unusable option is never a
+        recommendation, however new it is. Among usable ones, full zone coverage
+        beats partial, because partial coverage forces the deployment to pin
+        zones. Generation and existing headroom only break ties.
+    #>
+    param($Option)
+
+    if ($Option.Status -notin @('Available', 'ZeroQuota')) { return -1 }
+
+    $score = 1000
+    if ($Option.Coverage -eq 'Full' -or $Option.Coverage -eq 'NonZonal') { $score += 500 }
+    elseif ($Option.Coverage -eq 'Partial') { $score += 100 }
+    $score += [int]$Option.Version * 10
+    if ($null -ne $Option.Limit -and $null -ne $Option.Used -and ($Option.Limit - $Option.Used) -gt 0) { $score += 5 }
+    $score
+}
+
+function Get-AqrMcpAssessment {
+    <#
+    .SYNOPSIS
+        Assesses a SKU or quota family and recommends what to actually deploy.
+    .DESCRIPTION
+        Answers the three questions together, because separately they mislead:
+        is there quota, is the SKU usable at all, and is there a better
+        successor in this region. Quota headroom is meaningless if the SKU is
+        restricted, and a restriction is only actionable if an alternative
+        exists - so the verdict is derived from all of it at once.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$Location,
+        [Parameter(Mandatory)]$Sku
+    )
+
+    $family = Get-AqrMcpQuotaFamily -SubscriptionId $SubscriptionId -Location $Location -Sku $Sku
+    $regionZones = @(Get-AqrRegionZone -SubscriptionId $SubscriptionId -Location $Location)
+
+    # Both option sources mark the requested entry, so one shape covers a
+    # concrete size and a whole family without special-casing below.
+    $options = @(if ($Sku.IsFamily) {
+            Get-AqrFamilyOption -SubscriptionId $SubscriptionId -Location $Location -Family $Sku.Family
+        }
+        else {
+            Get-AqrSkuOption -SubscriptionId $SubscriptionId -Location $Location -VmSku $Sku.Name
+        })
+
+    $requestedRow = @($options | Where-Object { $_.IsRequested }) | Select-Object -First 1
+    $alternatives = @($options | Where-Object { -not $_.IsRequested })
+
+    # A concrete size also gets the richer restriction detail.
+    $av = $null
+    if (-not $Sku.IsFamily) {
+        $av = Get-AqrSkuAvailability -SubscriptionId $SubscriptionId -Location $Location -VmSku $Sku.Name
+    }
+
+    $status = if ($av) { $av.Status } elseif ($requestedRow) { $requestedRow.Status } else { 'NotOfferedInRegion' }
+    $usableZones = @(if ($av) { $av.UsableZones } elseif ($requestedRow) { $requestedRow.UsableZones })
+    $restrictedZones = @(if ($av) { $av.RestrictedZones } elseif ($requestedRow) { $requestedRow.RestrictedZones })
+    $offeredZones = @(if ($av) { $av.Zones } elseif ($requestedRow) { $requestedRow.Zones })
+    # A zone can be unusable for two different reasons and they need different
+    # answers: 'restricted' may be liftable, 'not offered' never is.
+    $notOffered = @($regionZones | Where-Object { $_ -notin $offeredZones })
+    $coverage = if (-not $regionZones.Count) { 'NonZonal' }
+    elseif (-not $usableZones.Count) { 'None' }
+    elseif ($usableZones.Count -lt $regionZones.Count) { 'Partial' }
+    else { 'Full' }
+
+    $familyQuota = Get-AqrQuota -SubscriptionId $SubscriptionId -Location $Location -QuotaName $family
+    $regional = Get-AqrQuota -SubscriptionId $SubscriptionId -Location $Location -QuotaName 'cores'
+
+    # --- what is actually blocking -----------------------------------------
+    $usable = $status -in @('Available', 'ZeroQuota')
+    $blockers = @()
+    switch ($status) {
+        'NotOfferedInRegion' { $blockers += "Azure does not offer this in $Location at all. A quota request cannot help." }
+        'RestrictedForSubscription' { $blockers += 'Not enabled for this subscription, or blocked in every zone. A quota request cannot lift this.' }
+        'RestrictedBySubscriptionOffer' { $blockers += 'The subscription offer excludes this SKU. A quota request cannot lift this.' }
+        'NoQuotaBucket' { $blockers += "The region exposes no quota bucket for '$family', so there is nothing to raise." }
+        'ZoneRestricted' { $blockers += 'Blocked in every zone that is offered here.' }
+        'ZeroQuota' { $blockers += 'The quota bucket exists but the limit is 0. This one a quota request can fix.' }
+    }
+    if ($usable -and $coverage -eq 'Partial') {
+        $blockers += "Usable in only $($usableZones.Count) of $($regionZones.Count) availability zones ($($usableZones -join ',')). The deployment must pin a usable zone."
+    }
+    if ($restrictedZones.Count) { $blockers += "AZ $($restrictedZones -join ',') restricted for this subscription." }
+    if ($notOffered.Count) { $blockers += "AZ $($notOffered -join ',') not available (not offered here, as opposed to blocked)." }
+
+    # --- ranked alternatives ------------------------------------------------
+    $ranked = @($alternatives |
+        Select-Object *, @{ n = 'Score'; e = { Get-AqrMcpAlternativeScore -Option $_ } } |
+        Where-Object { $_.Score -ge 0 } |
+        Sort-Object Score -Descending)
+
+    $altRows = foreach ($a in $ranked) {
+        $why = @()
+        if ($requestedRow -and $a.Version -gt $requestedRow.Version) { $why += 'newer generation' }
+        if ($a.Coverage -eq 'Full' -and $coverage -ne 'Full') { $why += 'usable in every AZ, unlike the requested one' }
+        elseif ($a.Coverage -eq 'Full') { $why += 'usable in every AZ' }
+        elseif ($a.Coverage -eq 'Partial') { $why += "usable in $(@($a.UsableZones).Count) of $($regionZones.Count) AZs only" }
+        if (-not $usable) { $why += 'usable while the requested one is not' }
+        if ($a.Status -eq 'ZeroQuota') { $why += 'quota limit is 0 and must be raised first' }
+        if ($a.InUse) { $why += "already in use ($($a.Used) vCPUs)" }
+
+        [pscustomobject]@{
+            name         = $a.Name
+            exampleSize  = if ($Sku.IsFamily -and @($a.Sizes).Count) { @($a.Sizes)[0] } else { $null }
+            status       = $a.Status
+            limit        = $a.Limit
+            used         = $a.Used
+            zoneCoverage = $a.Coverage
+            usableZones  = @($a.UsableZones)
+            why          = ($why -join '; ')
+        }
+    }
+    $altRows = @($altRows)
+
+    # --- verdict ------------------------------------------------------------
+    $best = $altRows | Select-Object -First 1
+    $betterExists = $best -and ($coverage -ne 'Full') -and ($best.zoneCoverage -eq 'Full')
+
+    if (-not $usable) {
+        $verdict = if ($best) { 'SwitchSku' } else { 'SupportCase' }
+        $summary = if ($best) {
+            "$($Sku.Name) cannot be used in $Location ($status). Switch to $($best.name) - $($best.why)."
+        }
+        else {
+            "$($Sku.Name) cannot be used in $Location ($status), and no newer generation here is usable either. This needs a support case or another region."
+        }
+    }
+    elseif ($status -eq 'ZeroQuota') {
+        $verdict = 'RequestQuota'
+        $summary = "$($Sku.Name) is offered in $Location but the quota limit is 0. Request quota to use it."
+    }
+    elseif ($betterExists) {
+        $verdict = 'ProceedOrSwitch'
+        $summary = "$($Sku.Name) is usable but only in AZ $($usableZones -join ','). $($best.name) covers every AZ - consider switching before raising quota."
+    }
+    elseif ($coverage -eq 'Partial') {
+        $verdict = 'ProceedWithZonePinning'
+        $summary = "$($Sku.Name) is usable in $Location but only in AZ $($usableZones -join ','). Quota can be raised; pin the deployment to a usable zone."
+    }
+    else {
+        $verdict = 'Proceed'
+        $summary = "$($Sku.Name) is usable in $Location across every availability zone. Quota can be raised normally."
+        # Say so even when nothing is wrong: a newer generation is usually the
+        # better place to put new capacity, and it is easy to miss.
+        if ($best) {
+            $newer = @($altRows | Where-Object { $_.why -match 'newer generation' } | Select-Object -First 3)
+            if ($newer.Count) {
+                $summary += " Newer generations are also usable here: $(($newer.name) -join ', ') - worth considering for new capacity."
+            }
+        }
+    }
+
+    [pscustomobject]@{
+        location        = $Location
+        query           = $Sku.Name
+        kind            = if ($Sku.IsFamily) { 'quota family' } else { 'vm sku' }
+        quotaFamily     = $family
+        status          = $status
+        canRequestQuota = if ($av) { $av.CanRequestQuota } else { $usable }
+        reason          = if ($av) { $av.Reason } else { $status }
+        detail          = if ($av) { $av.Detail } else { $null }
+        zones           = [pscustomobject]@{
+            coverage        = $coverage
+            regionZones     = $regionZones
+            usableZones     = $usableZones
+            restrictedZones = $restrictedZones
+            notOfferedZones = $notOffered
+        }
+        quota           = [pscustomobject]@{
+            family        = if ($familyQuota) { [pscustomobject]@{ name = $familyQuota.LocalizedName; limit = $familyQuota.Limit; used = $familyQuota.Used; available = $familyQuota.Available } } else { $null }
+            regionalTotal = if ($regional) { [pscustomobject]@{ name = $regional.LocalizedName; limit = $regional.Limit; used = $regional.Used; available = $regional.Available } } else { $null }
+        }
+        blockers        = @($blockers)
+        recommendation  = [pscustomobject]@{
+            verdict      = $verdict
+            summary      = $summary
+            bestPick     = if ($verdict -in @('SwitchSku', 'ProceedOrSwitch') -and $best) { $best.name } elseif ($usable) { $Sku.Name } else { $null }
+            alternatives = $altRows
+        }
+    }
+}
+
 function Invoke-AqrMcpTool {
     param([Parameter(Mandatory)][string]$Name, $Arguments)
 
@@ -303,79 +506,61 @@ function Invoke-AqrMcpTool {
     $sku = Resolve-AqrMcpSku -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Query (Get-AqrMcpArgument -Arguments $Arguments -Key 'vmSku')
 
     switch ($Name) {
+        'azqr_assess_sku' {
+            return New-AqrMcpToolResult -Payload (Get-AqrMcpAssessment -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Sku $sku)
+        }
+
         'azqr_check_quota' {
-            $family = Get-AqrMcpQuotaFamily -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Sku $sku
-            $familyQuota = Get-AqrQuota -SubscriptionId $ctx.subscriptionId -Location $loc.Name -QuotaName $family
-            $regional = Get-AqrQuota -SubscriptionId $ctx.subscriptionId -Location $loc.Name -QuotaName 'cores'
+            # Quota alone is misleading - a healthy limit on a restricted SKU
+            # reads like "you are fine" when nothing can be deployed. The
+            # verdict and blockers travel with the numbers.
+            $a = Get-AqrMcpAssessment -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Sku $sku
 
             return New-AqrMcpToolResult -Payload ([pscustomobject]@{
                     subscriptionId = $ctx.subscriptionId
                     location       = $loc.Name
-                    resolvedAs     = if ($sku.IsFamily) { 'quota family' } else { 'vm sku' }
-                    vmSku          = $sku.Name
-                    quotaFamily    = $family
-                    familyQuota    = if ($familyQuota) { [pscustomobject]@{ name = $familyQuota.LocalizedName; limit = $familyQuota.Limit; used = $familyQuota.Used; available = $familyQuota.Available } } else { $null }
-                    regionalTotal  = if ($regional) { [pscustomobject]@{ name = $regional.LocalizedName; limit = $regional.Limit; used = $regional.Used; available = $regional.Available } } else { $null }
-                    note           = if (-not $familyQuota) { "The region exposes no quota bucket for '$family'. A quota request cannot create one - this needs a support case." } else { $null }
+                    resolvedAs     = $a.kind
+                    vmSku          = $a.query
+                    quotaFamily    = $a.quotaFamily
+                    familyQuota    = $a.quota.family
+                    regionalTotal  = $a.quota.regionalTotal
+                    status         = $a.status
+                    blockers       = $a.blockers
+                    recommendation = $a.recommendation
+                    note           = if (-not $a.quota.family) { "The region exposes no quota bucket for '$($a.quotaFamily)'. A quota request cannot create one - this needs a support case." } else { $null }
                 })
         }
 
         'azqr_check_sku' {
-            if ($sku.IsFamily) { throw "'$($sku.Name)' is a quota family. Pass a concrete VM size, e.g. Standard_D4ads_v7." }
+            if ($sku.IsFamily) { throw "'$($sku.Name)' is a quota family. Pass a concrete VM size, e.g. Standard_D4ads_v7, or use azqr_assess_sku which accepts both." }
+            $a = Get-AqrMcpAssessment -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Sku $sku
             $av = Get-AqrSkuAvailability -SubscriptionId $ctx.subscriptionId -Location $loc.Name -VmSku $sku.Name
-            $regionZones = @(Get-AqrRegionZone -SubscriptionId $ctx.subscriptionId -Location $loc.Name)
-            # A zone can be unusable for two different reasons, and they need
-            # different answers: 'restricted' may be liftable, 'not offered'
-            # never is. Keep them apart rather than merging into "blocked".
-            $notOffered = @($regionZones | Where-Object { $_ -notin @($av.Zones) })
 
             return New-AqrMcpToolResult -Payload ([pscustomobject]@{
                     location              = $loc.Name
                     vmSku                 = $sku.Name
                     vCpus                 = $av.VCpus
-                    quotaFamily           = $av.Family
-                    status                = $av.Status
-                    canRequestQuota       = $av.CanRequestQuota
+                    quotaFamily           = $a.quotaFamily
+                    status                = $a.status
+                    canRequestQuota       = $a.canRequestQuota
                     supportRequestAdvised = $av.SupportRequestAdvised
-                    reason                = $av.Reason
-                    detail                = $av.Detail
-                    regionZones           = $regionZones
-                    usableZones           = @($av.UsableZones)
-                    restrictedZones       = @($av.RestrictedZones)
-                    notOfferedZones       = $notOffered
-                    zoneCoverage          = if (-not $regionZones.Count) { 'NonZonal' }
-                    elseif (-not @($av.UsableZones).Count) { 'None' }
-                    elseif (@($av.UsableZones).Count -lt $regionZones.Count) { 'Partial' }
-                    else { 'Full' }
+                    reason                = $a.reason
+                    detail                = $a.detail
+                    zones                 = $a.zones
+                    blockers              = $a.blockers
+                    recommendation        = $a.recommendation
                 })
         }
 
         'azqr_suggest_skus' {
-            $options = if ($sku.IsFamily) {
-                Get-AqrFamilyOption -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Family $sku.Family
-            }
-            else {
-                Get-AqrSkuOption -SubscriptionId $ctx.subscriptionId -Location $loc.Name -VmSku $sku.Name
-            }
-
-            $rows = foreach ($o in @($options | Sort-Object Version)) {
-                [pscustomobject]@{
-                    name            = $o.Name
-                    isCurrentChoice = [bool]$o.IsRequested
-                    status          = $o.Status
-                    limit           = $o.Limit
-                    used            = $o.Used
-                    usableZones     = @($o.UsableZones)
-                    zoneCoverage    = $o.Coverage
-                    exampleSize     = if ($sku.IsFamily -and @($o.Sizes).Count) { @($o.Sizes)[0] } else { $null }
-                }
-            }
-
+            $a = Get-AqrMcpAssessment -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Sku $sku
             return New-AqrMcpToolResult -Payload ([pscustomobject]@{
-                    location = $loc.Name
-                    query    = $sku.Name
-                    kind     = if ($sku.IsFamily) { 'quota family' } else { 'vm sku' }
-                    options  = @($rows)
+                    location       = $loc.Name
+                    query          = $a.query
+                    kind           = $a.kind
+                    currentStatus  = $a.status
+                    currentZones   = $a.zones
+                    recommendation = $a.recommendation
                 })
         }
 
@@ -388,16 +573,21 @@ function Invoke-AqrMcpTool {
             $family = Get-AqrMcpQuotaFamily -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Sku $sku
 
             # Refuse early when the SKU is blocked: a quota request cannot lift a
-            # subscription restriction, and submitting one only wastes time.
+            # subscription restriction. Return what WOULD work rather than a
+            # bare refusal, so the next step is obvious.
             if (-not $sku.IsFamily) {
                 $av = Get-AqrSkuAvailability -SubscriptionId $ctx.subscriptionId -Location $loc.Name -VmSku $sku.Name
                 if (-not $av.CanRequestQuota) {
+                    $a = Get-AqrMcpAssessment -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Sku $sku
                     return New-AqrMcpToolResult -IsError -Payload ([pscustomobject]@{
-                            outcome = 'NotRequestable'
-                            vmSku   = $sku.Name
-                            status  = $av.Status
-                            reason  = $av.Reason
-                            message = "A quota increase cannot help here: $($av.Reason) This needs a support case, another region, or another SKU."
+                            outcome        = 'NotRequestable'
+                            vmSku          = $sku.Name
+                            location       = $loc.Name
+                            status         = $a.status
+                            reason         = $a.reason
+                            blockers       = $a.blockers
+                            message        = "A quota increase cannot help here: $($a.reason) Nothing was requested."
+                            recommendation = $a.recommendation
                         })
                 }
             }
@@ -457,6 +647,13 @@ function Invoke-AqrMcpTool {
                 "All quota targets are at or above $target vCPUs."
             }
 
+            # A refusal is where an alternative matters most: another generation
+            # in this region may have the headroom this one was denied.
+            $recommendation = $null
+            if ($failed.Count -and -not $whatIf) {
+                $recommendation = (Get-AqrMcpAssessment -SubscriptionId $ctx.subscriptionId -Location $loc.Name -Sku $sku).recommendation
+            }
+
             return New-AqrMcpToolResult -IsError:([bool]$failed.Count) -Payload ([pscustomobject]@{
                     subscriptionId = $ctx.subscriptionId
                     location       = $loc.Name
@@ -465,6 +662,7 @@ function Invoke-AqrMcpTool {
                     whatIf         = $whatIf
                     results        = $results
                     summary        = $summary
+                    recommendation = $recommendation
                 })
         }
 

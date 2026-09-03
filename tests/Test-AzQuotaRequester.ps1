@@ -27,6 +27,32 @@ function Assert-True {
     else { Write-Host "  [FAIL] $Name $Detail" -ForegroundColor Red; $script:failures++ }
 }
 
+# Defined up here because both the online checks and the MCP section drive the
+# server, and the online block runs first.
+$mcpScript = Join-Path $root 'mcp\Start-AqrMcpServer.ps1'
+$handshake = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}'
+
+function Invoke-AqrMcpTestFrame {
+    <#
+    .SYNOPSIS
+        Sends JSON-RPC lines to a fresh server process and returns raw stdout.
+    #>
+    param([string[]]$Frame)
+    $psExe = (Get-Process -Id $PID).Path
+    ($Frame -join "`n") | & $psExe -NoProfile -File $mcpScript 2>$null
+}
+
+function Get-AqrMcpTestPayload {
+    <#
+    .SYNOPSIS
+        Runs one tool call and returns the deserialized tool payload.
+    #>
+    param([string]$Tool, [hashtable]$ToolArgs)
+    $call = @{ jsonrpc = '2.0'; id = 2; method = 'tools/call'; params = @{ name = $Tool; arguments = $ToolArgs } } | ConvertTo-Json -Depth 10 -Compress
+    $out = @(Invoke-AqrMcpTestFrame -Frame @($handshake, $call))
+    ($out[1] | ConvertFrom-Json).result.content[0].text | ConvertFrom-Json
+}
+
 Write-Host "`nAzQuotaRequester self-test" -ForegroundColor Cyan
 
 # --- syntax -----------------------------------------------------------------
@@ -545,6 +571,39 @@ if ($Online) {
     Assert-True -Name "$VmSku availability is classified" -Condition ($class.Status -in 'Available', 'ZeroQuota', 'ZoneRestricted', 'NoQuotaBucket', 'RestrictedForSubscription', 'RestrictedBySubscriptionOffer') -Detail $class.Status
     Assert-True -Name 'availability carries a reason' -Condition ([bool]$class.Reason) -Detail $class.Reason
 
+    # The recommendation is the point of the assessment, so exercise it against
+    # the live subscription rather than trusting the source text.
+    $assessed = Get-AqrMcpTestPayload -Tool 'azqr_assess_sku' -ToolArgs @{ location = $loc.Name; vmSku = $VmSku }
+    $validVerdicts = 'Proceed', 'ProceedWithZonePinning', 'ProceedOrSwitch', 'SwitchSku', 'SupportCase', 'RequestQuota'
+    $alts = @($assessed.recommendation.alternatives)
+
+    Assert-True -Name 'the assessment reaches a verdict' -Condition ($assessed.recommendation.verdict -in $validVerdicts) -Detail $assessed.recommendation.verdict
+    Assert-True -Name 'the verdict is explained in prose' -Condition ($assessed.recommendation.summary.Length -gt 30)
+    Assert-True -Name 'quota and zones travel with the verdict' -Condition ($null -ne $assessed.quota -and $null -ne $assessed.zones)
+    Assert-True -Name 'zone coverage is classified' -Condition ($assessed.zones.coverage -in 'Full', 'Partial', 'None', 'NonZonal') -Detail $assessed.zones.coverage
+    Assert-True -Name 'every recommended alternative is usable' -Condition (@($alts | Where-Object { $_.status -notin 'Available', 'ZeroQuota' }).Count -eq 0)
+    Assert-True -Name 'every alternative says why it is offered' -Condition (@($alts | Where-Object { -not $_.why }).Count -eq 0)
+    Assert-True -Name 'alternatives are ranked, full coverage before partial' -Condition (
+        $alts.Count -lt 2 -or -not @($alts | Where-Object { $_.zoneCoverage -eq 'Full' }).Count -or $alts[0].zoneCoverage -eq 'Full'
+    )
+    Assert-True -Name 'a usable SKU is its own best pick' -Condition (
+        $assessed.recommendation.verdict -notin @('Proceed', 'ProceedWithZonePinning') -or $assessed.recommendation.bestPick -eq $assessed.query
+    )
+    Assert-True -Name 'a switch verdict never points back at the blocked SKU' -Condition (
+        $assessed.recommendation.verdict -ne 'SwitchSku' -or $assessed.recommendation.bestPick -ne $assessed.query
+    )
+
+    # A restriction must never read as "you have quota, go ahead".
+    $blocked = Get-AqrMcpTestPayload -Tool 'azqr_check_quota' -ToolArgs @{ location = 'germanywestcentral'; vmSku = 'Standard_D4ads_v5' }
+    if ($blocked.status -eq 'RestrictedForSubscription') {
+        Assert-True -Name 'a restricted SKU is flagged inside the quota result' -Condition (@($blocked.blockers).Count -gt 0)
+        Assert-True -Name 'a restricted SKU never gets a proceed verdict' -Condition ($blocked.recommendation.verdict -in 'SwitchSku', 'SupportCase') -Detail $blocked.recommendation.verdict
+        Assert-True -Name 'quota headroom does not mask the restriction' -Condition ($blocked.familyQuota.limit -le 0 -or @($blocked.blockers).Count -gt 0)
+    }
+    else {
+        Assert-True -Name 'restricted-SKU check skipped (not restricted here)' -Condition $true -Detail $blocked.status
+    }
+
     $missing = Get-AqrSkuAvailability -SubscriptionId $context.SubscriptionId -Location $loc.Name -VmSku 'Standard_NoSuchSku_v9'
     Assert-True -Name 'unknown SKU is NotOfferedInRegion' -Condition ($missing.Status -eq 'NotOfferedInRegion') -Detail $missing.Status
     Assert-True -Name 'unknown SKU cannot request quota' -Condition (-not $missing.CanRequestQuota -and -not $missing.SupportRequestAdvised)
@@ -601,20 +660,8 @@ if ($Online) {
 # output, a missing newline, an answered notification) only appear there.
 Write-Host "`nMCP server" -ForegroundColor Cyan
 
-$mcpScript = Join-Path $root 'mcp\Start-AqrMcpServer.ps1'
 Assert-True -Name 'the MCP server is shipped' -Condition (Test-Path $mcpScript)
 
-function Invoke-AqrMcpTestFrame {
-    <#
-    .SYNOPSIS
-        Sends JSON-RPC lines to a fresh server process and returns raw stdout.
-    #>
-    param([string[]]$Frame)
-    $psExe = (Get-Process -Id $PID).Path
-    ($Frame -join "`n") | & $psExe -NoProfile -File $mcpScript 2>$null
-}
-
-$handshake = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}'
 $raw = @(Invoke-AqrMcpTestFrame -Frame @(
         $handshake
         '{"jsonrpc":"2.0","method":"notifications/initialized"}'
@@ -679,6 +726,30 @@ Assert-True -Name 'the preview summary is chosen before the success summary' -Co
 Assert-True -Name 'a request is verified by re-reading the limit' -Condition ($mcpText -match '\$after = Get-AqrQuota' -and $mcpText -match "'Unverified'")
 Assert-True -Name 'a restricted SKU is refused before requesting' -Condition ($mcpText -match 'NotRequestable')
 Assert-True -Name 'the server never signs in interactively' -Condition ($mcpText -notmatch 'Connect-AzAccount\s*$' -and $mcpText -match 'Not signed in to Azure')
+
+# Recommendations. Quota, restrictions and successors are only useful together:
+# a healthy limit on a restricted SKU reads like "you are fine" on its own.
+Assert-True -Name 'tools/list offers azqr_assess_sku' -Condition (@($tools.name) -contains 'azqr_assess_sku')
+$assessTool = @($tools | Where-Object { $_.name -eq 'azqr_assess_sku' })[0]
+Assert-True -Name 'assess_sku is read-only' -Condition ($assessTool.annotations.readOnlyHint -eq $true)
+Assert-True -Name 'assess_sku is steered as the preferred entry point' -Condition ($assessTool.description -match 'Prefer this over')
+Assert-True -Name 'assess_sku promises a recommendation' -Condition ($assessTool.description -match 'recommends')
+
+Assert-True -Name 'one assessment feeds every tool' -Condition (@([regex]::Matches($mcpText, 'Get-AqrMcpAssessment -SubscriptionId')).Count -ge 5)
+Assert-True -Name 'quota results carry the verdict' -Condition ($mcpText -match 'recommendation = \$a\.recommendation')
+Assert-True -Name 'a refused request suggests alternatives' -Condition ($mcpText -match 'if \(\$failed\.Count -and -not \$whatIf\)')
+foreach ($v in 'Proceed', 'ProceedWithZonePinning', 'ProceedOrSwitch', 'SwitchSku', 'SupportCase', 'RequestQuota') {
+    # Matches the literal, not an assignment shape: some verdicts are chosen
+    # inline, and pinning the syntax breaks on a harmless refactor.
+    Assert-True -Name "the verdict '$v' exists" -Condition ($mcpText -match "'$v'")
+}
+Assert-True -Name 'a blocked SKU with no usable successor asks for support' -Condition ($mcpText -match "if \(\`$best\) \{ 'SwitchSku' \} else \{ 'SupportCase' \}")
+Assert-True -Name 'an unusable option scores below zero' -Condition ($mcpText -match "Status -notin @\('Available', 'ZeroQuota'\)\) \{ return -1 \}")
+Assert-True -Name 'unusable candidates are filtered out before ranking' -Condition ($mcpText -match 'Where-Object \{ \$_\.Score -ge 0 \}')
+Assert-True -Name 'full zone coverage outranks partial' -Condition ($mcpText -match "\`$score \+= 500" -and $mcpText -match "\`$score \+= 100")
+Assert-True -Name 'a healthy SKU still surfaces newer generations' -Condition ($mcpText -match 'worth considering for new capacity')
+Assert-True -Name 'blockers separate restricted from not offered' -Condition ($mcpText -match 'not offered here, as opposed to blocked')
+Assert-True -Name 'a restriction says a quota request cannot lift it' -Condition (@([regex]::Matches($mcpText, 'quota request cannot')).Count -ge 3)
 
 Write-Host ''
 if ($failures -eq 0) { Write-Host "All checks passed." -ForegroundColor Green }

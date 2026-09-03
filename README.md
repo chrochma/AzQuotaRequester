@@ -141,9 +141,12 @@ Then ask in plain language:
 > *"Raise the Dadsv7 quota there to 64."*
 
 The server runs locally and uses your existing `Connect-AzAccount` session, so
-quota reads and requests happen under your own RBAC. It exposes four read-only
+quota reads and requests happen under your own RBAC. Results carry a
+**recommendation**, not just numbers: quota headroom, subscription
+restrictions, zone coverage and newer generations are assessed together, so a
+healthy limit on a restricted SKU never reads as "you're fine". Five read-only
 tools and one that requests an increase; it never files a support case. Setup,
-the full tool list and the safety rules are in **[mcp/README.md](mcp/README.md)**.
+the verdicts and the safety rules are in **[mcp/README.md](mcp/README.md)**.
 
 This works with **GitHub Copilot CLI and VS Code**. Microsoft 365 Copilot and
 Copilot Studio cannot use it — they only accept a remote HTTPS MCP server and
