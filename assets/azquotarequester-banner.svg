@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="AzQuotaRequester banner">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1c33"/>
+      <stop offset="55%" stop-color="#10375c"/>
+      <stop offset="100%" stop-color="#0078d4"/>
+    </linearGradient>
+    <linearGradient id="gauge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#50e6ff"/>
+      <stop offset="65%" stop-color="#2ecc71"/>
+      <stop offset="100%" stop-color="#ffb900"/>
+    </linearGradient>
+    <linearGradient id="chip" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#50e6ff"/>
+      <stop offset="100%" stop-color="#0078d4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="300" fill="url(#bg)"/>
+  <g opacity="0.10" stroke="#ffffff" stroke-width="1">
+    <path d="M0 75 H1200 M0 150 H1200 M0 225 H1200"/>
+    <path d="M300 0 V300 M600 0 V300 M900 0 V300"/>
+  </g>
+
+  <!-- Left icon zone: x 62..198 -->
+  <g transform="translate(75,95)">
+    <rect x="0" y="0" width="110" height="110" rx="16" fill="url(#chip)" opacity="0.92"/>
+    <rect x="22" y="22" width="66" height="66" rx="8" fill="#0b1c33" opacity="0.88"/>
+    <text x="55" y="66" font-family="Segoe UI, Arial, sans-serif" font-size="27" font-weight="700" fill="#50e6ff" text-anchor="middle">vC</text>
+    <g stroke="#50e6ff" stroke-width="6" stroke-linecap="round">
+      <path d="M28 -13 V0 M55 -13 V0 M82 -13 V0"/>
+      <path d="M28 110 V123 M55 110 V123 M82 110 V123"/>
+      <path d="M-13 28 H0 M-13 55 H0 M-13 82 H0"/>
+      <path d="M110 28 H123 M110 55 H123 M110 82 H123"/>
+    </g>
+  </g>
+
+  <!-- Text zone: x 250..900, kept clear of both icon zones -->
+  <text x="250" y="112" font-family="Segoe UI, Arial, sans-serif" font-size="52" font-weight="700" fill="#ffffff">AzQuotaRequester</text>
+  <text x="252" y="150" font-family="Segoe UI, Arial, sans-serif" font-size="19" fill="#a8d8ff">Check the quota, raise it, escalate to a support case</text>
+
+  <!-- Quota gauge, ends well before the ticket card -->
+  <g transform="translate(252,186)">
+    <rect x="0" y="0" width="560" height="18" rx="9" fill="#ffffff" opacity="0.16"/>
+    <rect x="0" y="0" width="352" height="18" rx="9" fill="url(#gauge)"/>
+    <rect x="350" y="-8" width="5" height="34" rx="2" fill="#ffffff"/>
+    <text x="0" y="46" font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#a8d8ff">used</text>
+    <text x="560" y="46" font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#a8d8ff" text-anchor="end">new limit</text>
+  </g>
+
+  <!-- Right icon zone: x 980..1140 -->
+  <g transform="translate(985,88)">
+    <rect x="0" y="0" width="150" height="126" rx="12" fill="#ffffff" opacity="0.95"/>
+    <rect x="0" y="0" width="150" height="26" rx="12" fill="#0078d4"/>
+    <rect x="0" y="16" width="150" height="10" fill="#0078d4"/>
+    <g fill="#10375c">
+      <rect x="18" y="46" width="114" height="9" rx="4"/>
+      <rect x="18" y="66" width="88" height="9" rx="4"/>
+      <rect x="18" y="86" width="102" height="9" rx="4"/>
+    </g>
+    <circle cx="124" cy="110" r="17" fill="#2ecc71"/>
+    <path d="M116 110 l6 7 l12 -14" stroke="#ffffff" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- Arrow from the gauge into the ticket card -->
+  <g stroke="#50e6ff" stroke-width="4" fill="none" opacity="0.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M868 151 H952"/>
+    <path d="M938 139 l14 12 l-14 12"/>
+  </g>
+</svg>

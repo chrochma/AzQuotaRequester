@@ -1,0 +1,5 @@
+# The personal support ticket template must never be committed or overwritten
+# by a git sync. It lives in the user profile by default; this only covers a
+# copy that is deliberately kept next to the tool.
+config/support-ticket-template.json
+config/*.bak

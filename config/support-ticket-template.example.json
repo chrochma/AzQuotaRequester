@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Adjustable template for the Azure quota support ticket.",
+    "Placeholders replaced at runtime: {SubscriptionId} {SubscriptionName} {Location} {VmSku} {QuotaName}",
+    "{QuotaDisplayName} {CurrentLimit} {CurrentUsage} {TargetLimit} {AdditionalVCores} {Timestamp} {AutoRequestResult}",
+    "severity: minimal | moderate | critical | highestcriticalimpact",
+    "Quota cases are normally 'minimal'; higher severities need a paid support plan.",
+    "preferredContactMethod: email | phone",
+    "preferredTimeZone: Windows time zone id, e.g. 'W. Europe Standard Time'",
+    "country: 3-letter ISO 3166 code, e.g. DEU / USA / GBR",
+    "preferredSupportLanguage: locale, e.g. en-us / de-de",
+    "advancedDiagnosticConsent: Yes | No",
+    "phoneNumber and additionalEmailAddresses are optional and are omitted when empty.",
+    "quotaChangeRequestSubType stays empty for Compute; it only applies to Batch/SQLMI."
+  ],
+
+  "title": "vCPU quota increase: {QuotaDisplayName} to {TargetLimit} in {Location}",
+  "severity": "minimal",
+  "require24x7Response": false,
+  "advancedDiagnosticConsent": "No",
+
+  "description": "Please increase the compute vCPU quota for subscription {SubscriptionName} ({SubscriptionId}).\n\nRegion:            {Location}\nVM SKU:            {VmSku}\nQuota family:      {QuotaName} ({QuotaDisplayName})\nCurrent limit:     {CurrentLimit} vCPUs\nCurrent usage:     {CurrentUsage} vCPUs\nRequested limit:   {TargetLimit} vCPUs\nAdditional vCPUs:  {AdditionalVCores}\n\nThe automatic quota request via Microsoft.Quota did not succeed:\n{AutoRequestResult}\n\nBusiness justification: planned workload rollout requires the additional capacity.\n\nRaised automatically by AzQuotaRequester at {Timestamp}.",
+
+  "contactDetails": {
+    "firstName": "Change",
+    "lastName": "Me",
+    "primaryEmailAddress": "change.me@example.com",
+    "additionalEmailAddresses": [],
+    "phoneNumber": "",
+    "preferredContactMethod": "email",
+    "preferredTimeZone": "W. Europe Standard Time",
+    "country": "DEU",
+    "preferredSupportLanguage": "en-us"
+  },
+
+  "quotaTicketDetails": {
+    "quotaChangeRequestSubType": "",
+    "quotaChangeRequestVersion": "1.0"
+  },
+
+  "supportPlanId": null
+}
