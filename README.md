@@ -5,6 +5,8 @@
 PowerShell tool for Azure compute vCPU quota increases: it checks the quota you already have, requests more through the `Microsoft.Quota` API, and escalates to an Azure support case only when the automatic request is refused.
 
 > **Just want the process, not the tool?** [docs/quota-automation-manual.md](docs/quota-automation-manual.md) documents the same steps as standalone REST/PowerShell snippets you can drop into your own code.
+>
+> **Want it in chat instead?** [mcp/README.md](mcp/README.md) runs the same logic as a local MCP server, so GitHub Copilot CLI or VS Code can check and request quota as *you*, using your existing Azure sign-in.
 
 ---
 
@@ -126,6 +128,26 @@ Twelve steps: contact name, e-mail, additional e-mails, contact method, phone, c
 ```
 
 The online run never writes anything — the support case is rendered with `-WhatIf` and only inspected.
+
+### 4. Optional: use it from Copilot instead
+
+```powershell
+copilot mcp add azquota -- pwsh -NoProfile -File C:\path\to\AzQuotaRequester\mcp\Start-AqrMcpServer.ps1
+```
+
+Then ask in plain language:
+
+> *"Do I have room for eight more D4ads_v7 in Italy North?"*
+> *"Raise the Dadsv7 quota there to 64."*
+
+The server runs locally and uses your existing `Connect-AzAccount` session, so
+quota reads and requests happen under your own RBAC. It exposes four read-only
+tools and one that requests an increase; it never files a support case. Setup,
+the full tool list and the safety rules are in **[mcp/README.md](mcp/README.md)**.
+
+This works with **GitHub Copilot CLI and VS Code**. Microsoft 365 Copilot and
+Copilot Studio cannot use it — they only accept a remote HTTPS MCP server and
+cannot reach your machine. See [mcp/README.md](mcp/README.md#why-this-cannot-work-with-microsoft-365-copilot).
 
 ---
 

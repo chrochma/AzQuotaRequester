@@ -595,6 +595,91 @@ if ($Online) {
     Assert-True -Name 'ticket description has no leftover placeholders' -Condition ($payload.properties.description -notmatch '\{[A-Za-z]+\}')
 }
 
+# --- MCP server -------------------------------------------------------------
+# Driven over real stdio rather than by calling functions: the whole point of
+# this server is the wire protocol, and the failure modes that matter (stray
+# output, a missing newline, an answered notification) only appear there.
+Write-Host "`nMCP server" -ForegroundColor Cyan
+
+$mcpScript = Join-Path $root 'mcp\Start-AqrMcpServer.ps1'
+Assert-True -Name 'the MCP server is shipped' -Condition (Test-Path $mcpScript)
+
+function Invoke-AqrMcpTestFrame {
+    <#
+    .SYNOPSIS
+        Sends JSON-RPC lines to a fresh server process and returns raw stdout.
+    #>
+    param([string[]]$Frame)
+    $psExe = (Get-Process -Id $PID).Path
+    ($Frame -join "`n") | & $psExe -NoProfile -File $mcpScript 2>$null
+}
+
+$handshake = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}'
+$raw = @(Invoke-AqrMcpTestFrame -Frame @(
+        $handshake
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+        '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+        '{"jsonrpc":"2.0","id":3,"method":"ping"}'
+        '{"jsonrpc":"2.0","id":4,"method":"no/such/method"}'
+    ))
+
+Assert-True -Name 'a notification is never answered' -Condition ($raw.Count -eq 4) -Detail "got $($raw.Count) lines"
+Assert-True -Name 'every stdout line is one JSON message' -Condition (@($raw | Where-Object { -not ($_ | ConvertFrom-Json -ErrorAction SilentlyContinue) }).Count -eq 0)
+
+$init = $raw[0] | ConvertFrom-Json
+Assert-True -Name 'initialize reports the protocol version' -Condition ($init.result.protocolVersion -eq '2025-06-18')
+Assert-True -Name 'initialize reports serverInfo' -Condition ($init.result.serverInfo.name -and $init.result.serverInfo.version)
+Assert-True -Name 'initialize advertises tools' -Condition ($null -ne $init.result.capabilities.tools)
+Assert-True -Name 'initialize carries usage instructions' -Condition ($init.result.instructions -match 'absolute limit')
+
+$old = @(Invoke-AqrMcpTestFrame -Frame @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}'))
+Assert-True -Name 'a known older protocol is echoed back' -Condition ((($old[0] | ConvertFrom-Json).result.protocolVersion) -eq '2024-11-05')
+$odd = @(Invoke-AqrMcpTestFrame -Frame @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01","capabilities":{}}}'))
+Assert-True -Name 'an unknown protocol falls back to ours' -Condition ((($odd[0] | ConvertFrom-Json).result.protocolVersion) -ne '1999-01-01')
+
+$unknown = $raw[3] | ConvertFrom-Json
+Assert-True -Name 'an unknown method is a JSON-RPC error' -Condition ($unknown.error.code -eq -32601)
+Assert-True -Name 'ping answers' -Condition ($null -ne ($raw[2] | ConvertFrom-Json).result)
+
+$bad = @(Invoke-AqrMcpTestFrame -Frame @('this is not json'))
+Assert-True -Name 'malformed input is a parse error, not a crash' -Condition ((($bad[0] | ConvertFrom-Json).error.code) -eq -32700)
+
+$tools = ($raw[1] | ConvertFrom-Json).result.tools
+$expected = 'azqr_get_context', 'azqr_check_quota', 'azqr_check_sku', 'azqr_suggest_skus', 'azqr_request_quota'
+foreach ($t in $expected) {
+    Assert-True -Name "tools/list offers $t" -Condition (@($tools.name) -contains $t)
+}
+Assert-True -Name 'every tool has a description' -Condition (@($tools | Where-Object { -not $_.description }).Count -eq 0)
+Assert-True -Name 'every tool has an object input schema' -Condition (@($tools | Where-Object { $_.inputSchema.type -ne 'object' }).Count -eq 0)
+Assert-True -Name 'the read tools are marked read-only' -Condition (@($tools | Where-Object { $_.name -ne 'azqr_request_quota' -and -not $_.annotations.readOnlyHint }).Count -eq 0)
+Assert-True -Name 'the request tool is not marked read-only' -Condition ((@($tools | Where-Object { $_.name -eq 'azqr_request_quota' })[0].annotations.readOnlyHint) -eq $false)
+Assert-True -Name 'the request tool documents the absolute limit' -Condition ((@($tools | Where-Object { $_.name -eq 'azqr_request_quota' })[0].description) -match 'ABSOLUTE')
+Assert-True -Name 'the request tool never files a support case' -Condition ((@($tools | Where-Object { $_.name -eq 'azqr_request_quota' })[0].description) -match 'never files a support case')
+
+# The modules narrate with Write-Host, which lands on stdout and would corrupt
+# the stream. This is the check that proves the process-wide guard holds.
+$mcpText = Get-Content $mcpScript -Raw
+Assert-True -Name 'stdout is captured before being blackholed' -Condition ($mcpText -match '\$Rpc = \[Console\]::Out' -and $mcpText -match '\[Console\]::SetOut')
+Assert-True -Name 'JSON-RPC is written only through the captured handle' -Condition ($mcpText -match '\$Rpc\.WriteLine')
+Assert-True -Name 'messages are compressed to a single line' -Condition ($mcpText -match 'ConvertTo-Json -Depth \d+ -Compress')
+Assert-True -Name 'the server does not print with Write-Host' -Condition ($mcpText -notmatch '(?m)^\s*Write-Host')
+
+$noisy = @(Invoke-AqrMcpTestFrame -Frame @(
+        $handshake
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"azqr_check_quota","arguments":{"location":"nowhere-at-all","vmSku":"nope"}}}'
+    ))
+Assert-True -Name 'a failing tool call still yields clean JSON only' -Condition (@($noisy | Where-Object { -not ($_ | ConvertFrom-Json -ErrorAction SilentlyContinue) }).Count -eq 0)
+$err = ($noisy[1] | ConvertFrom-Json)
+Assert-True -Name 'a tool failure is a result with isError, not a protocol error' -Condition ($err.result.isError -eq $true -and $null -eq $err.error)
+Assert-True -Name 'a tool failure explains itself' -Condition ($err.result.content[0].text.Length -gt 10)
+
+# A preview must never read as an outcome.
+Assert-True -Name 'a preview never claims the target was reached' -Condition ($mcpText -match 'Preview only, nothing was changed')
+Assert-True -Name 'the preview summary is chosen before the success summary' -Condition ($mcpText -match '\$summary = if \(\$whatIf\)')
+Assert-True -Name 'a request is verified by re-reading the limit' -Condition ($mcpText -match '\$after = Get-AqrQuota' -and $mcpText -match "'Unverified'")
+Assert-True -Name 'a restricted SKU is refused before requesting' -Condition ($mcpText -match 'NotRequestable')
+Assert-True -Name 'the server never signs in interactively' -Condition ($mcpText -notmatch 'Connect-AzAccount\s*$' -and $mcpText -match 'Not signed in to Azure')
+
 Write-Host ''
 if ($failures -eq 0) { Write-Host "All checks passed." -ForegroundColor Green }
 else { Write-Host "$failures check(s) failed." -ForegroundColor Red; exit 1 }
