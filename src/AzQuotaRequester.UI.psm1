@@ -242,11 +242,69 @@ function Select-AqrAzureContext {
     }
 }
 
+function Test-AqrConsoleInput {
+    # ReadKey cannot be used in redirected, embedded, or unattended hosts.
+    $nonInteractive = @([Environment]::GetCommandLineArgs() | Where-Object {
+        $_.Length -ge 5 -and '-NonInteractive'.StartsWith($_, [StringComparison]::OrdinalIgnoreCase)
+    }).Count -gt 0
+    $Host.Name -eq 'ConsoleHost' -and [Environment]::UserInteractive -and
+        -not $nonInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected
+}
+
+function Read-AqrConsoleKey {
+    [Console]::ReadKey($true).Key
+}
+
+function Read-AqrArrowChoice {
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][string[]]$Option
+    )
+
+    if (-not (Test-AqrConsoleInput)) {
+        throw 'The region picker requires an interactive console. Supply -Location (for example, -Location westeurope); use -NonInteractive for unattended runs.'
+    }
+
+    Write-Host ''
+    Write-Host "  $Title" -ForegroundColor Cyan
+    foreach ($label in $Option) { Write-Host "    $label" }
+    Write-AqrInfo 'Use Up/Down arrows to select, then Enter to confirm.'
+
+    $index = 0
+    $width = ($Option | Measure-Object -Property Length -Maximum).Maximum
+    while ($true) {
+        # Redraw only the selected-value line; no cursor positioning or ANSI required.
+        Write-Host ("`r  > {0}" -f $Option[$index].PadRight($width)) -NoNewline -ForegroundColor Cyan
+        switch (Read-AqrConsoleKey) {
+            'UpArrow'   { $index = ($index + $Option.Count - 1) % $Option.Count }
+            'DownArrow' { $index = ($index + 1) % $Option.Count }
+            'Enter'     { Write-Host ''; return $Option[$index] }
+        }
+    }
+}
+
 function Select-AqrLocation {
     param(
         [Parameter(Mandatory)][string]$SubscriptionId,
         [string]$Default = 'westeurope'
     )
+    $regions = [ordered]@{
+        'Germany West Central' = 'germanywestcentral'
+        'West Europe' = 'westeurope'
+        'North Europe' = 'northeurope'
+        'East US' = 'eastus'
+        'Mexico Central' = 'mexicocentral'
+        'Southeast Asia' = 'southeastasia'
+        'Japan East' = 'japaneast'
+        'South Africa North' = 'southafricanorth'
+    }
+    $choice = Read-AqrArrowChoice -Title 'Region' -Option @(@($regions.Keys) + 'Other')
+    if ($choice -ne 'Other') {
+        $value = $regions[$choice]
+        Write-AqrStep "Resolving region '$value' ..."
+        return (Get-AqrLocation -SubscriptionId $SubscriptionId -Location $value)
+    }
+
     while ($true) {
         $value = Read-AqrText -Prompt 'Region (name or display name)' -Default $Default
         try {
@@ -329,13 +387,8 @@ function Show-AqrSkuOption {
         if ($isFamily -and $o.Sizes.Count) { $note += "e.g. $($o.Sizes[0])" }
         if ($o.InUse) { $note += "in use ($($o.Used))" }
 
-        # A zone can be missing for two different reasons; say which.
-        if ($o.NotOfferedZones.Count) {
-            $note += "AZ $($o.NotOfferedZones -join ',') not available"
-        }
-        if ($o.RestrictedZones.Count) {
-            $note += "AZ $($o.RestrictedZones -join ',') restricted for this subscription"
-        }
+        $zoneSummary = Get-AqrZoneSummary -ZoneInfo $o
+        if ($zoneSummary) { $note += $zoneSummary }
         if ($usable -and $partial) {
             $note += "only $($o.UsableZones.Count) of $($o.RegionZones.Count) AZs"
         }
@@ -378,7 +431,7 @@ function Show-AqrSkuOption {
     }
     elseif ($limited) {
         Write-Host ''
-        Write-AqrWarn "A newer generation is usable but not in every AZ: $(($limited | ForEach-Object { "$($_.Name) (AZ $($_.UsableZones -join ','))" }) -join ', '). Pin the deployment to a usable zone."
+        Write-AqrAlertBlock -Level Warn -Text "A newer generation is usable but not in every AZ: $(($limited | ForEach-Object { "$($_.Name) (AZ $($_.UsableZones -join ','))" }) -join ', '). Pin the deployment to a usable zone."
     }
 }
 
@@ -524,14 +577,16 @@ function Resolve-AqrSkuQuota {
             $availability = Get-AqrSkuAvailability -SubscriptionId $SubscriptionId -Location $Location -VmSku $VmSku -QuotaName $quotaName
         }
         catch {
-            Write-AqrWarn $_.Exception.Message
+            Write-AqrAlertBlock -Level Warn -Text $_.Exception.Message
             if ($NonInteractive) { throw }
             $VmSku = $null
             continue
         }
 
         if ($availability.Status -in 'Available', 'ZeroQuota', 'ZoneRestricted') {
-            if ($availability.Status -ne 'Available') { Write-AqrWarn "$($availability.Reason). $($availability.Detail)" }
+            if ($availability.Status -ne 'Available') {
+                Write-AqrAlertBlock -Level Warn -Text @("$($availability.Reason).", $availability.Detail)
+            }
             return [pscustomobject]@{
                 VmSku = $availability.VmSku
                 Sku = Resolve-AqrVmSku -SubscriptionId $SubscriptionId -Location $Location -VmSku $availability.VmSku
@@ -543,8 +598,7 @@ function Resolve-AqrSkuQuota {
         }
 
         # Unusable: say why, then let the user decide how to continue.
-        Write-AqrFail "$VmSku in $Location - $($availability.Reason)."
-        Write-AqrInfo $availability.Detail
+        Write-AqrAlertBlock -Level Fail -Text @("$VmSku in $Location - $($availability.Reason).", $availability.Detail)
 
         if ($NonInteractive) { throw "$VmSku in $Location - $($availability.Reason). $($availability.Detail)" }
 

@@ -95,6 +95,20 @@ function Write-AqrWarn { param([string]$Text) Write-Host "  [warn] $Text" -Foreg
 function Write-AqrFail { param([string]$Text) Write-Host "  [fail] $Text" -ForegroundColor Red }
 function Write-AqrInfo { param([string]$Text) Write-Host "  $Text" -ForegroundColor White }
 
+function Write-AqrAlertBlock {
+    param(
+        [Parameter(Mandatory)][string[]]$Text,
+        [ValidateSet('Warn', 'Fail')][string]$Level = 'Warn'
+    )
+    $color = if ($Level -eq 'Fail') { 'Red' } else { 'Yellow' }
+    $separator = "  $('-' * 60)"
+    Write-Host $separator -ForegroundColor $color
+    foreach ($line in $Text) {
+        if ($Level -eq 'Fail') { Write-AqrFail $line } else { Write-AqrWarn $line }
+    }
+    Write-Host $separator -ForegroundColor $color
+}
+
 #endregion
 
 #region ARM plumbing --------------------------------------------------------
@@ -408,6 +422,8 @@ function Get-AqrSkuAvailability {
         Family                = $sku.family
         VCpus                 = 0
         Zones                 = @()
+        RegionZones           = @()
+        NotOfferedZones       = @()
         RestrictedZones       = @()
         Status                = 'NotOfferedInRegion'
         Reason                = $null
@@ -425,8 +441,12 @@ function Get-AqrSkuAvailability {
     }
 
     $info.VCpus = [int](($sku.capabilities | Where-Object name -EQ 'vCPUs' | Select-Object -First 1).value)
-    $zoneInfo = Get-AqrSkuZoneInfo -Sku $sku
+    $regionZones = @(Get-AqrRegionZone -SubscriptionId $SubscriptionId -Location $Location)
+    $zoneInfo = Get-AqrSkuZoneInfo -Sku $sku -RegionZone $regionZones
     $info.Zones = $zoneInfo.Zones
+    $info.RegionZones = $zoneInfo.RegionZones
+    $info.NotOfferedZones = $zoneInfo.NotOfferedZones
+    $zoneSummary = Get-AqrZoneSummary -ZoneInfo $zoneInfo
 
     $restrictions = @($sku.restrictions)
     $locationBlock = $restrictions | Where-Object { $_.type -eq 'Location' } | Select-Object -First 1
@@ -445,6 +465,7 @@ function Get-AqrSkuAvailability {
             $info.Reason = "Restricted for this subscription ($($locationBlock.reasonCode))"
             $info.Detail = "$VmSku exists in $Location but is not enabled for this subscription, usually a staged rollout or a capacity restriction. Access has to be requested through support."
         }
+        if ($zoneSummary) { $info.Detail = "$zoneSummary. $($info.Detail)" }
         return [pscustomobject]$info
     }
 
@@ -452,30 +473,30 @@ function Get-AqrSkuAvailability {
     $quota = Get-AqrQuota -SubscriptionId $SubscriptionId -Location $Location -QuotaName $QuotaName
     $info.Quota = $quota
 
+    if ($info.RestrictedZones.Count -gt 0 -and $info.UsableZones.Count -eq 0) {
+        $info.Status = 'RestrictedForSubscription'
+        $info.Reason = $zoneSummary
+        $info.Detail = "$VmSku has no usable availability zone in $Location. Access has to be requested through support."
+        $info.SupportRequestAdvised = $true
+        return [pscustomobject]$info
+    }
+
     if (-not $quota) {
         $info.Status = 'NoQuotaBucket'
         $info.Reason = 'No quota bucket in this region'
-        $info.Detail = "$VmSku is offered in $Location and is not restricted, but the region exposes no quota bucket '$QuotaName' for this subscription. The family is not enabled here yet, so the automatic quota API cannot be used - a support request is the way in."
+        $info.Detail = "$VmSku is offered in $Location, but the region exposes no quota bucket '$QuotaName' for this subscription. The family is not enabled here yet, so the automatic quota API cannot be used - a support request is the way in."
+        if ($zoneSummary) { $info.Detail = "$zoneSummary. $($info.Detail)" }
         $info.SupportRequestAdvised = $true
         return [pscustomobject]$info
     }
 
     if ($info.RestrictedZones.Count -gt 0 -and $info.UsableZones.Count -gt 0) {
         $info.Status = 'ZoneRestricted'
-        $info.Reason = "Restricted in zone(s) $($info.RestrictedZones -join ', ')"
+        $info.Reason = $zoneSummary
         $info.Detail = "$VmSku is usable in $Location in zone(s) $($info.UsableZones -join ', ') only. Quota can be requested normally, but pin the deployment to a usable zone."
         $info.CanRequestQuota = $true
         return [pscustomobject]$info
     }
-    if ($info.RestrictedZones.Count -gt 0 -and $info.UsableZones.Count -eq 0) {
-        # Every offered zone is blocked, so the SKU cannot be deployed at all.
-        $info.Status = 'RestrictedForSubscription'
-        $info.Reason = 'Restricted in every zone of this region'
-        $info.Detail = "$VmSku is blocked in all zones ($($info.RestrictedZones -join ', ')) for this subscription in $Location. Access has to be requested through support."
-        $info.SupportRequestAdvised = $true
-        return [pscustomobject]$info
-    }
-
     $info.CanRequestQuota = $true
     if ($quota.Limit -le 0) {
         $info.Status = 'ZeroQuota'
@@ -582,6 +603,19 @@ function Get-AqrSkuZoneInfo {
         # Every offered zone blocked means the SKU is effectively unusable here.
         FullyRestricted  = ($offered.Count -gt 0 -and $usable.Count -eq 0)
     }
+}
+
+function Get-AqrZoneSummary {
+    param([Parameter(Mandatory)]$ZoneInfo)
+
+    $parts = @()
+    if ($ZoneInfo.NotOfferedZones.Count) {
+        $parts += "AZ $($ZoneInfo.NotOfferedZones -join ',') not available"
+    }
+    if ($ZoneInfo.RestrictedZones.Count) {
+        $parts += "AZ $($ZoneInfo.RestrictedZones -join ',') restricted for this subscription"
+    }
+    $parts -join '; '
 }
 
 function Get-AqrSkuOption {
@@ -1279,7 +1313,7 @@ function Wait-AqrQuotaValue {
 
 Export-ModuleMember -Function @(
     'Write-AqrHeadline', 'Write-AqrStep', 'Write-AqrOk', 'Write-AqrWarn', 'Write-AqrFail', 'Write-AqrInfo',
-    'Write-AqrColorLine', 'Test-AqrAnsiSupport',
+    'Write-AqrColorLine', 'Test-AqrAnsiSupport', 'Write-AqrAlertBlock', 'Get-AqrZoneSummary',
     'Invoke-AqrArm', 'Get-AqrResponseHeader',
     'Initialize-AqrContext', 'Test-AqrResourceProvider', 'Get-AqrLocation',
     'Resolve-AqrVmSku', 'Get-AqrVmSkuName', 'Get-AqrQuota',

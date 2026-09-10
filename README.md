@@ -78,6 +78,19 @@ Twelve steps: contact name, e-mail, additional e-mails, contact method, phone, c
 .\Start-AzQuotaRequest.ps1
 ```
 
+Step 3 offers a region picker in this order: **Germany West Central**, **West
+Europe**, **North Europe**, **East US**, **Mexico Central**, **Southeast Asia**,
+**Japan East**, **South Africa North**, **Other**. Use **Up/Down** to change the
+selected value below the list and **Enter** to confirm; navigation wraps at
+either end. The initial selection is Germany West Central. Presets resolve to
+Azure's canonical region names. **Other** keeps the existing name/display-name
+prompt, its `westeurope` default, and resolution retries.
+
+The picker requires an interactive console with unredirected input and output.
+Unsupported or non-interactive hosts fail promptly with `-Location` guidance,
+rather than reading keys or silently choosing a region. Supply all required
+parameters and `-NonInteractive` for unattended runs.
+
 **Unattended** — for a pipeline:
 
 ```powershell
@@ -125,9 +138,18 @@ Twelve steps: contact name, e-mail, additional e-mails, contact method, phone, c
 .\tests\Test-AzQuotaRequester.ps1                 # offline: parsing, exports, template validation
 .\tests\Test-AzQuotaRequester.ps1 -Online         # adds read-only Azure checks
 .\tests\Test-AzQuotaRequester.ps1 -Online -Location westeurope -VmSku Standard_D4s_v5
+.\tests\Test-AqrConsole.ps1                      # targeted offline picker and alert regressions
 ```
 
 The online run never writes anything — the support case is rendered with `-WhatIf` and only inspected.
+
+SKU warning/error blocks have separator lines above and below the complete
+explanation, including continuation text. Tables and follow-up failures share
+the same assessed AZ wording, for example `AZ 3 not available; AZ 1,2 restricted
+for this subscription`, or `AZ 1,2,3 restricted for this subscription` when all
+three offered zones are restricted. Regional zones are read from Azure, never
+assumed; when regional mappings are unknown, only the SKU's known zones are
+described.
 
 ### 4. Optional: use it from Copilot instead
 

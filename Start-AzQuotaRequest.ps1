@@ -178,12 +178,10 @@ try {
     Write-AqrInfo "Availability: $($availability.Status) - $($availability.Reason)"
     if ($availability.SubscriptionOffer) { Write-AqrInfo "Subscription offer: $($availability.SubscriptionOffer)" }
     if ($availability.RestrictedZones.Count -gt 0) {
-        if ($availability.UsableZones.Count -gt 0) {
-            Write-AqrWarn "Zonal restriction in $Location : zone(s) $($availability.RestrictedZones -join ', ') blocked, deployable in $($availability.UsableZones -join ', ')."
-        }
-        else {
-            Write-AqrWarn "Zonal restriction in $Location : every zone ($($availability.RestrictedZones -join ', ')) is blocked for this subscription."
-        }
+        $zoneDetail = Get-AqrZoneSummary -ZoneInfo $availability
+        $usableDetail = if ($availability.UsableZones.Count -gt 0) { "Deployable in AZ $($availability.UsableZones -join ',')." }
+                        else { 'No usable availability zone.' }
+        Write-AqrAlertBlock -Level Warn -Text @("Zonal restriction in $Location : $zoneDetail.", $usableDetail)
     }
 
     # --- 4. current quota ---------------------------------------------------
@@ -248,7 +246,7 @@ try {
 
         if ($ForceSupportTicket -or $skipThis) {
             $why = if ($skipThis) {
-                "Microsoft.Quota cannot serve '$($target.Quota.Name)' in $Location ($($availability.Status)). Going straight to a support request."
+                "Microsoft.Quota cannot serve '$($target.Quota.Name)' in $Location ($($availability.Status)). $($availability.Reason). $($availability.Detail) Going straight to a support request."
             }
             else { 'Automatic request skipped (-ForceSupportTicket).' }
             Write-AqrWarn $why

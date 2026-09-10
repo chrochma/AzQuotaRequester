@@ -303,8 +303,10 @@ Assert-True -Name 'core exports Get-AqrRegionZone' -Condition ($core.ExportedFun
 $zoneShow = (Get-Command Show-AqrSkuOption).Definition
 Assert-True -Name 'partial AZ coverage is coloured light yellow' -Condition ($zoneShow -match "elseif \(\`$partial\) \{ 'PartialZone' \}")
 Assert-True -Name 'partial coverage is not marked recommended' -Condition ($zoneShow -match "elseif \(\`$usable -and -not \`$partial\) \{ '\*' \}")
-Assert-True -Name 'missing AZ is worded not available' -Condition ($zoneShow -match 'not available')
-Assert-True -Name 'restricted AZ is worded restricted' -Condition ($zoneShow -match 'restricted for this subscription')
+Assert-True -Name 'table uses shared AZ explanation' -Condition ($zoneShow -match 'Get-AqrZoneSummary')
+$zoneSummaryText = (Get-Command Get-AqrZoneSummary).Definition
+Assert-True -Name 'missing AZ is worded not available' -Condition ($zoneSummaryText -match 'not available')
+Assert-True -Name 'restricted AZ is worded restricted' -Condition ($zoneSummaryText -match 'restricted for this subscription')
 Assert-True -Name 'AZ count is shown for partial coverage' -Condition ($zoneShow -match 'only \$\(\$o\.UsableZones\.Count\) of')
 Assert-True -Name 'blocked wording is gone' -Condition ($zoneShow -notmatch 'blocked')
 
@@ -538,6 +540,9 @@ $selText = (Get-Command Select-AqrVmSku).Definition
 Assert-True -Name 'the family label keeps its two-space separator' -Condition ($selText -match '\$\(\$_\.DisplayName\)  \[\$\(\$_\.Status\)\]\$tag - e\.g\.')
 $label = 'standard Dadv6 Family vCPUs  [Available] (newer, all AZs) - e.g. Standard_D2ads_v6'
 Assert-True -Name 'a labelled family still matches its option' -Condition ($label -like 'standard Dadv6 Family vCPUs  *')
+
+# --- console regression checks ---------------------------------------------
+& (Join-Path $PSScriptRoot 'Test-AqrConsole.ps1')
 
 # --- online checks ----------------------------------------------------------
 if ($Online) {
