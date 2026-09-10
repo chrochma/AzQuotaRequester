@@ -180,7 +180,7 @@ try {
     if ($availability.RestrictedZones.Count -gt 0) {
         $zoneDetail = Get-AqrZoneSummary -ZoneInfo $availability
         $usableDetail = if ($availability.UsableZones.Count -gt 0) { "Deployable in AZ $($availability.UsableZones -join ',')." }
-                        else { 'No usable availability zone.' }
+                        else { 'No enabled availability zone. Open Support Request to validate possibilities.' }
         Write-AqrAlertBlock -Level Warn -Text @("Zonal restriction in $Location : $zoneDetail.", $usableDetail)
     }
 

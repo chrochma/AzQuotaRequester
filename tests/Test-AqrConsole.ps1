@@ -231,6 +231,12 @@ Test-ConsoleCase 'warning frames enclose reason and all explanation lines' {
     Assert-AlertFrame (ConvertTo-ConsoleText $records) @('[warn]', 'AZ 3 not available; AZ 2 restricted for this subscription', 'Usable in AZ 1 only. Pin the deployment.')
 }
 
+Test-ConsoleCase 'disabled-zone warning uses the support-request guidance' {
+    $scriptText = Get-Content -LiteralPath (Join-Path $root 'Start-AzQuotaRequest.ps1') -Raw
+    Assert-Console ($scriptText.Contains('No enabled availability zone. Open Support Request to validate possibilities.')) 'Disabled-zone warning text changed unexpectedly.'
+    Assert-Console (-not $scriptText.Contains('No usable availability zone.')) 'Obsolete disabled-zone warning text remains.'
+}
+
 Test-ConsoleCase 'partial newer-generation warning is framed after the table legend' {
     $option = [pscustomobject]@{
         Name = 'Standard_D2ads_v7'; VCpus = 2; Status = 'Available'; Coverage = 'Partial'
